@@ -13,6 +13,7 @@ const { spawn, execFile } = require('child_process');
 const { promisify } = require('util');
 const { WebSocketServer } = require('ws');
 const cookie = require('cookie');
+const AdmZip = require('adm-zip');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -254,6 +255,64 @@ app.post('/api/servers/:id/upload', upload.single('file'), (req, res) => {
   try { if (!req.file) return res.status(400).json({ error: 'Pilih file.' }); const dir = resolveFile(req.params.id, req.body.path || ''); const name = path.basename(req.file.originalname); if (name === 'panel.json') return res.status(400).json({ error: 'Nama file tidak diizinkan.' }); fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, name), req.file.buffer); res.json({ ok: true, name }); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
+
+// Extract ZIP archives safely inside the selected server directory.
+app.post('/api/servers/:id/extract', (req, res) => {
+  try {
+    const archivePath = resolveFile(req.params.id, req.body.path || '');
+    const stat = fs.statSync(archivePath);
+    if (!stat.isFile() || path.extname(archivePath).toLowerCase() !== '.zip') {
+      return res.status(400).json({ error: 'Pilih file ZIP yang valid.' });
+    }
+    if (stat.size > 10 * 1024 * 1024) {
+      return res.status(413).json({ error: 'File ZIP melebihi batas 10 MB.' });
+    }
+    const parent = path.dirname(archivePath);
+    const requested = String(req.body.destination || path.basename(archivePath, '.zip')).trim();
+    if (!requested || requested.includes('/') || requested.includes('\\') || requested === '.' || requested === '..') {
+      return res.status(400).json({ error: 'Nama folder tujuan tidak valid.' });
+    }
+    const destination = resolveFile(req.params.id, path.relative(serverDir(req.params.id), path.join(parent, requested)));
+    if (fs.existsSync(destination)) return res.status(409).json({ error: 'Folder tujuan sudah ada. Ganti nama folder tujuan.' });
+
+    const zip = new AdmZip(archivePath);
+    const entries = zip.getEntries();
+    if (!entries.length || entries.length > 3000) return res.status(400).json({ error: 'Jumlah isi ZIP tidak valid (maksimal 3000 item).' });
+    let expandedBytes = 0;
+    const root = path.resolve(destination);
+    for (const entry of entries) {
+      const entryName = String(entry.entryName || '').replace(/\\/g, '/');
+      if (!entryName || entryName.startsWith('/') || /^[a-zA-Z]:/.test(entryName) ||
+          entryName.split('/').some(part => part === '..' || part === '')) {
+        // Empty segments are tolerated only for a trailing directory slash.
+        if (!(entryName.endsWith('/') && entryName.split('/').slice(0, -1).every(part => part && part !== '..'))) {
+          return res.status(400).json({ error: 'ZIP berisi path yang tidak aman.' });
+        }
+      }
+      const target = path.resolve(root, entryName);
+      if (target !== root && !target.startsWith(root + path.sep)) return res.status(400).json({ error: 'ZIP berisi path di luar folder tujuan.' });
+      expandedBytes += Number(entry.header?.size || 0);
+      if (expandedBytes > 200 * 1024 * 1024) return res.status(413).json({ error: 'Ukuran hasil ekstrak melebihi batas 200 MB.' });
+    }
+    fs.mkdirSync(destination, { recursive: false });
+    try {
+      for (const entry of entries) {
+        const entryName = String(entry.entryName || '').replace(/\\/g, '/');
+        const target = path.resolve(root, entryName);
+        if (entry.isDirectory) fs.mkdirSync(target, { recursive: true });
+        else {
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.writeFileSync(target, entry.getData());
+        }
+      }
+    } catch (err) {
+      fs.rmSync(destination, { recursive: true, force: true });
+      throw err;
+    }
+    res.json({ ok: true, destination: path.relative(serverDir(req.params.id), destination).replace(/\\/g, '/') });
+  } catch (e) { res.status(400).json({ error: e.message || 'Gagal mengekstrak ZIP.' }); }
+});
+
 app.post('/api/servers/:id/mkdir', (req, res) => {
   try { const name = String(req.body.name || '').trim(); if (!name || name.includes('/') || name.includes('\\')) return res.status(400).json({ error: 'Nama folder tidak valid.' }); fs.mkdirSync(resolveFile(req.params.id, path.join(req.body.path || '', name)), { recursive: false }); res.json({ ok: true }); }
   catch (e) { res.status(400).json({ error: e.message }); }

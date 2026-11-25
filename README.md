@@ -29,7 +29,7 @@ Personal, single-account web panel for managing Node.js and Python bot processes
 - One login account only (username defaults to `KYAMZ`; password is checked against a bcrypt hash).
 - Create Node.js or Python server folders with starter file.
 - Start, stop, restart, force-kill; live stdout/stderr console over WebSocket; stdin command input.
-- File manager: browse directories, create files/folders, edit text files (up to 2 MB), upload files (up to 10 MB), delete files/folders.
+- File manager: browse directories, create files/folders, edit text files (up to 2 MB), upload files (up to 10 MB), extract ZIP archives (max 10 MB ZIP / 200 MB extracted / 3000 entries), delete files/folders.
 - Startup command, auto-restart setting, memory/CPU allocation labels, process memory and uptime display.
 - Mobile-responsive interface.
 

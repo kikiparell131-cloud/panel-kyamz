@@ -102,11 +102,36 @@ function getStats(id) {
   }
   return { memoryMB, uptime: proc?.startedAt ? Math.floor((Date.now() - proc.startedAt) / 1000) : 0 };
 }
+function signalProcessGroup(proc, signal) {
+  const pid = proc?.child?.pid;
+  if (!pid) return false;
+  try {
+    // Child dijalankan detached sehingga PID-nya menjadi process-group ID.
+    // Kirim sinyal ke seluruh group: shell, npm, dan node bot sekaligus.
+    process.kill(-pid, signal);
+    return true;
+  } catch (error) {
+    if (error.code !== 'ESRCH') {
+      try { proc.child.kill(signal); return true; } catch {}
+    }
+    return false;
+  }
+}
 function stopServer(id, force = false) {
   const p = running.get(id); if (!p || !p.child) return false;
   p.autoStopping = true;
-  try { p.child.kill(force ? 'SIGKILL' : 'SIGTERM'); } catch {}
-  if (force) running.delete(id);
+  p.stopping = true;
+  signalProcessGroup(p, force ? 'SIGKILL' : 'SIGTERM');
+  if (!force) {
+    clearTimeout(p.forceKillTimer);
+    p.forceKillTimer = setTimeout(() => {
+      if (p.child && p.child.exitCode === null) {
+        sendLog(id, '[panel] Proses belum berhenti; mengirim SIGKILL ke seluruh process group.\n');
+        signalProcessGroup(p, 'SIGKILL');
+      }
+    }, 5000);
+    p.forceKillTimer.unref();
+  }
   return true;
 }
 function startServer(id) {
@@ -116,11 +141,11 @@ function startServer(id) {
   const cwd = serverDir(id);
   const cmd = String(meta.startup || '').trim();
   if (!cmd) throw new Error('Perintah startup belum diatur');
-  const proc = { child: null, startedAt: Date.now(), autoStopping: false, restartCount: 0 };
+  const proc = { child: null, startedAt: Date.now(), autoStopping: false, stopping: false, restartCount: 0, forceKillTimer: null };
   // This command is intentionally owner-configurable: only the authenticated personal panel can call it.
   const child = spawn('/bin/sh', ['-lc', cmd], {
     cwd, shell: false, env: { ...process.env, PORT: String(meta.port || process.env.PORT || 3000), PANEL_SERVER_ID: id },
-    stdio: ['pipe', 'pipe', 'pipe'], detached: false
+    stdio: ['pipe', 'pipe', 'pipe'], detached: true
   });
   proc.child = child; running.set(id, proc);
   sendLog(id, `[panel] Menjalankan: ${cmd}\n`);
@@ -128,6 +153,7 @@ function startServer(id) {
   child.stderr.on('data', b => sendLog(id, b.toString()));
   child.on('error', e => sendLog(id, `[error] ${e.message}\n`));
   child.on('exit', (code, signal) => {
+    clearTimeout(proc.forceKillTimer);
     sendLog(id, `\n[panel] Proses berhenti (code=${code}, signal=${signal || '-'})\n`);
     const latest = running.get(id);
     if (latest === proc) {
@@ -222,8 +248,21 @@ app.patch('/api/servers/:id', (req, res) => {
 app.post('/api/servers/:id/start', (req, res) => { try { res.json({ ok: true, pid: startServer(req.params.id) }); } catch (e) { res.status(400).json({ error: e.message }); } });
 app.post('/api/servers/:id/stop', (req, res) => res.json({ ok: stopServer(req.params.id) }));
 app.post('/api/servers/:id/kill', (req, res) => res.json({ ok: stopServer(req.params.id, true) }));
-app.post('/api/servers/:id/restart', (req, res) => {
-  const id = req.params.id; stopServer(id); setTimeout(() => { try { startServer(id); } catch (e) { sendLog(id, `[panel] Restart gagal: ${e.message}\n`); } }, 900); res.json({ ok: true });
+app.post('/api/servers/:id/restart', async (req, res) => {
+  const id = req.params.id;
+  const proc = running.get(id);
+  if (proc?.child && proc.child.exitCode === null) {
+    stopServer(id);
+    await Promise.race([
+      new Promise(resolve => proc.child.once('exit', resolve)),
+      new Promise(resolve => setTimeout(resolve, 6500))
+    ]);
+    if (proc.child.exitCode === null) {
+      return res.status(504).json({ error: 'Proses lama belum berhenti. Gunakan Kill lalu coba Start kembali.' });
+    }
+  }
+  try { const pid = startServer(id); res.json({ ok: true, pid }); }
+  catch (e) { res.status(400).json({ error: e.message }); }
 });
 app.delete('/api/servers/:id', (req, res) => {
   try { const id = req.params.id; stopServer(id, true); fs.rmSync(serverDir(id), { recursive: true, force: true }); res.json({ ok: true }); }

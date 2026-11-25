@@ -352,6 +352,30 @@ app.delete('/api/servers/:id/file', (req, res) => {
   try { const file = resolveFile(req.params.id, req.body.path || ''); if (!req.body.path || path.basename(file) === 'panel.json') return res.status(400).json({ error: 'Path tidak valid.' }); fs.rmSync(file, { recursive: true, force: false }); res.json({ ok: true }); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
+app.post('/api/servers/:id/files/bulk-delete', (req, res) => {
+  try {
+    const paths = Array.isArray(req.body.paths) ? req.body.paths : [];
+    if (!paths.length) return res.status(400).json({ error: 'Pilih minimal satu file atau folder.' });
+    if (paths.length > 1000) return res.status(413).json({ error: 'Maksimal 1.000 item sekali hapus.' });
+    const root = serverDir(req.params.id);
+    const targets = [...new Set(paths.map(value => String(value || ''))) ].map(rel => {
+      if (!rel || path.basename(rel.replace(/\\/g, '/')) === 'panel.json') throw new Error('Path kosong atau file sistem tidak boleh dihapus.');
+      const target = resolveFile(req.params.id, rel);
+      if (target === root) throw new Error('Root server tidak boleh dihapus.');
+      if (!fs.existsSync(target)) throw new Error(`Item tidak ditemukan: ${rel}`);
+      return { rel, target };
+    });
+    // Cegah pengiriman path induk dan anak sekaligus agar hitungan hasil tetap jelas.
+    for (let i = 0; i < targets.length; i++) for (let j = i + 1; j < targets.length; j++) {
+      if (targets[i].target.startsWith(targets[j].target + path.sep) || targets[j].target.startsWith(targets[i].target + path.sep)) {
+        throw new Error('Jangan pilih folder dan isi folder tersebut secara bersamaan.');
+      }
+    }
+    for (const item of targets) fs.rmSync(item.target, { recursive: true, force: false });
+    res.json({ ok: true, deleted: targets.length });
+  } catch (e) { res.status(400).json({ error: e.message || 'Gagal menghapus item.' }); }
+});
+
 app.post('/api/servers/:id/command', (req, res) => {
   const p = running.get(req.params.id); const command = String(req.body.command || '').slice(0, 2000);
   if (!p?.child || p.child.exitCode !== null) return res.status(409).json({ error: 'Server sedang offline.' });

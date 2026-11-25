@@ -313,6 +313,33 @@ app.post('/api/servers/:id/extract', (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message || 'Gagal mengekstrak ZIP.' }); }
 });
 
+// Move multiple selected files/folders. Destination "../" is a shortcut to this server's root.
+app.post('/api/servers/:id/move', (req, res) => {
+  try {
+    const id = req.params.id;
+    const root = serverDir(id);
+    const items = Array.isArray(req.body.paths) ? req.body.paths : [];
+    const destinationInput = String(req.body.destination || '').trim();
+    if (!items.length || items.length > 500) return res.status(400).json({ error: 'Pilih 1 sampai 500 item.' });
+    if (!destinationInput) return res.status(400).json({ error: 'Masukkan folder tujuan.' });
+    const destination = destinationInput === '../' || destinationInput === '..' ? root : resolveFile(id, destinationInput.replace(/^\.\//, ''));
+    if (!fs.existsSync(destination) || !fs.statSync(destination).isDirectory()) return res.status(400).json({ error: 'Folder tujuan tidak ditemukan.' });
+
+    const sources = [...new Set(items.map(v => String(v)))].map(rel => {
+      const source = resolveFile(id, rel);
+      if (source === root || path.basename(source) === 'panel.json' || !fs.existsSync(source)) throw new Error(`Item tidak valid: ${rel}`);
+      const st = fs.lstatSync(source);
+      if (st.isSymbolicLink()) throw new Error('Symbolic link tidak dapat dipindahkan.');
+      if (st.isDirectory() && (destination === source || destination.startsWith(source + path.sep))) throw new Error('Folder tidak bisa dipindahkan ke dalam dirinya sendiri.');
+      const target = path.join(destination, path.basename(source));
+      if (fs.existsSync(target)) throw new Error(`Tujuan sudah memiliki item bernama ${path.basename(source)}.`);
+      return { source, target };
+    });
+    for (const item of sources) fs.renameSync(item.source, item.target);
+    res.json({ ok: true, moved: sources.length, destination: path.relative(root, destination).replace(/\\/g, '/') || '/' });
+  } catch (e) { res.status(400).json({ error: e.message || 'Gagal memindahkan item.' }); }
+});
+
 app.post('/api/servers/:id/mkdir', (req, res) => {
   try { const name = String(req.body.name || '').trim(); if (!name || name.includes('/') || name.includes('\\')) return res.status(400).json({ error: 'Nama folder tidak valid.' }); fs.mkdirSync(resolveFile(req.params.id, path.join(req.body.path || '', name)), { recursive: false }); res.json({ ok: true }); }
   catch (e) { res.status(400).json({ error: e.message }); }

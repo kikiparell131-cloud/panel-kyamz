@@ -156,9 +156,37 @@ app.post('/api/logout', auth, (req, res) => req.session.destroy(() => res.json({
 app.get('/api/me', (req, res) => res.json({ authenticated: !!req.session?.authenticated, username: USERNAME }));
 app.use('/api', auth);
 
+function readContainerMemoryMB() {
+  // Prefer the container's cgroup memory limits/usage (Railway), not the
+  // underlying host's RAM. Fall back to Node's host memory values.
+  try {
+    const limitRaw = fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
+    const usedRaw = fs.readFileSync('/sys/fs/cgroup/memory.current', 'utf8').trim();
+    if (limitRaw !== 'max') {
+      const limit = Number(limitRaw), used = Number(usedRaw);
+      if (Number.isFinite(limit) && limit > 0 && Number.isFinite(used)) {
+        const totalMemoryMB = Math.max(1, Math.round(limit / 1024 / 1024));
+        const usedMemoryMB = Math.max(0, Math.round(used / 1024 / 1024));
+        return { totalMemoryMB, freeMemoryMB: Math.max(0, totalMemoryMB - usedMemoryMB) };
+      }
+    }
+  } catch {}
+  try {
+    const limitRaw = fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8').trim();
+    const usedRaw = fs.readFileSync('/sys/fs/cgroup/memory/memory.usage_in_bytes', 'utf8').trim();
+    const limit = Number(limitRaw), used = Number(usedRaw);
+    if (Number.isFinite(limit) && limit > 0 && limit < 1e15 && Number.isFinite(used)) {
+      const totalMemoryMB = Math.max(1, Math.round(limit / 1024 / 1024));
+      const usedMemoryMB = Math.max(0, Math.round(used / 1024 / 1024));
+      return { totalMemoryMB, freeMemoryMB: Math.max(0, totalMemoryMB - usedMemoryMB) };
+    }
+  } catch {}
+  return { totalMemoryMB: Math.round(os.totalmem()/1024/1024), freeMemoryMB: Math.round(os.freemem()/1024/1024) };
+}
 app.get('/api/overview', (req, res) => {
   const servers = listServers();
-  res.json({ servers, host: { hostname: os.hostname(), cpuCount: os.cpus().length, load: os.loadavg()[0], totalMemoryMB: Math.round(os.totalmem()/1024/1024), freeMemoryMB: Math.round(os.freemem()/1024/1024), node: process.version, python: 'Python 3 (available if installed)' } });
+  const memory = readContainerMemoryMB();
+  res.json({ servers, host: { hostname: os.hostname(), cpuCount: os.cpus().length, load: os.loadavg()[0], ...memory, node: process.version, python: 'Python 3 (available if installed)' } });
 });
 app.post('/api/servers', (req, res) => {
   try {
